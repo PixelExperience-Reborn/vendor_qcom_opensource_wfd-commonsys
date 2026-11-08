@@ -1,0 +1,21 @@
+name: AOSP17 mondrian WFD AAC source safety
+on:
+  push:
+    branches:
+      - port/a17-mondrian-wfdaac-ownership-buffers-20261108
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native-encoder-and-packaging-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: C++17 source encoding mock, ASan/UBSan and GNU Make platform guards
+        run: python3 tests/check_android17_mondrian_wfdaac.py
+      - name: Scope
+        run: |
+          echo "Source-only: no actual Fraunhofer codec test, Soong Android17 build, WFD video or physical mondrian."
+          echo "Miracast requires separately audited Xiaomi WfdCommon/HDCP/VDS/MediaCodec binaries."
