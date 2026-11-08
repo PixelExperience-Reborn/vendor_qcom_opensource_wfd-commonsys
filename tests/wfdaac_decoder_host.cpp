@@ -68,6 +68,8 @@ int main() {
         assert(!decoder.aacConfigure(nullptr));
         assert(decoder.aacConfigure(&cfg));
         assert(live_decoders == 1);
+        // Rejected before touching caller memory or attempting huge scratch.
+        assert(!decoder.aacDecodeFrame(data, 1024 * 1024));
         assert(decoder.aacDecodeFrame(data, 16));
         INT_PCM output[8] = {};
         std::memcpy(output, data, sizeof(output));
