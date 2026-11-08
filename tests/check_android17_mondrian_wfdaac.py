@@ -56,6 +56,41 @@ class WfdAacSourceTests(unittest.TestCase):
             self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
             self.assertIn("PASS: WFD AAC configure", run.stdout)
 
+    def test_real_cxx_decoder_buffer_bounds_and_lifecycle(self):
+        source = (ROOT / "libaac/aacDecode.cpp").read_text(encoding="utf-8")
+        for symbol in (
+            "new (std::nothrow) INT_PCM[sample_capacity]",
+            "aacDecoder_GetStreamInfo(decoder)",
+            "info->frameSize > static_cast<INT>(sample_capacity) / info->numChannels",
+            "delete[] pcm;", "memcpy(p_buffer, pcm,",
+        ):
+            with self.subTest(symbol=symbol):
+                self.assertIn(symbol, source)
+        with tempfile.TemporaryDirectory(prefix="pe-wfdaac-decode-") as td:
+            exe = Path(td) / "wfdaac-decode-test"
+            cmd = [
+                "g++", "-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic",
+                "-fno-omit-frame-pointer", "-fsanitize=address,undefined",
+                "-I", str(ROOT / "tests/fakes"),
+                "-I", str(ROOT / "libaac"),
+                str(ROOT / "libaac/aacDecode.cpp"),
+                str(ROOT / "tests/wfdaac_decoder_host.cpp"),
+                "-o", str(exe),
+            ]
+            build = subprocess.run(cmd, capture_output=True, text=True,
+                                   cwd=ROOT, check=False)
+            self.assertEqual(build.returncode, 0, build.stdout + build.stderr)
+            run = subprocess.run(
+                [str(exe)], capture_output=True, text=True, cwd=ROOT,
+                check=False, env={
+                    **os.environ,
+                    "ASAN_OPTIONS": "alloc_dealloc_mismatch=1:detect_leaks=1",
+                    "UBSAN_OPTIONS": "halt_on_error=1",
+                },
+            )
+            self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+            self.assertIn("PASS: WFD AAC decoder", run.stdout)
+
     def product_make(self, device, board="taro", qmaa="false",
                      qmaa_override="false", low_ram="false"):
         with tempfile.TemporaryDirectory(prefix="pe-wfd-make-") as td:
