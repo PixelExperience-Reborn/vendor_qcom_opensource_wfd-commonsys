@@ -29,15 +29,21 @@
 
 #include "aacEncode.h"
 #include "aacenc_lib.h"
+
 #include <utils/Log.h>
+#include <limits.h>
+#include <new>
 #include <string.h>
 
-struct aacInfo
-{
-    AACENC_BufDesc inBuff;
-    AACENC_BufDesc outBuff;
-    AACENC_InArgs  inArg;
-    AACENC_OutArgs outArg;
+/*
+ * This wrapper is an old private WFD ABI. Do not change class layout: older
+ * vendor consumers allocate aacEncode using the size from aacEncode.h.
+ */
+struct aacInfo {
+    AACENC_BufDesc inBuff = {};
+    AACENC_BufDesc outBuff = {};
+    AACENC_InArgs inArg = {};
+    AACENC_OutArgs outArg = {};
 };
 
 aacEncode::aacEncode() {
@@ -47,105 +53,144 @@ aacEncode::aacEncode() {
 }
 
 aacEncode::~aacEncode() {
-    if(!p_aacHandle) {
-        return;
+    if (p_aacHandle) {
+        HANDLE_AACENCODER encoder = static_cast<HANDLE_AACENCODER>(p_aacHandle);
+        if (aacEncClose(&encoder) != AACENC_OK) {
+            ALOGE("Failed to close WFD AAC encoder");
+        }
+        p_aacHandle = NULL;
     }
-
-    if(aacEncClose((HANDLE_AACENCODER*)(&p_aacHandle)) != AACENC_OK) {
-        ALOGE("aacEncClose Failed");
-        return;
-    }
+    delete static_cast<aacInfo*>(p_aacInfo);
+    p_aacInfo = NULL;
 }
 
-bool aacEncode::aacConfigure(aacConfigType * p_aacConfig) {
-    if(!p_aacConfig) {
+bool aacEncode::aacConfigure(aacConfigType *p_aacConfig) {
+    if (!p_aacConfig ||
+        (p_aacConfig->n_channels != 1 && p_aacConfig->n_channels != 2) ||
+        p_aacConfig->n_sampleRate == 0 || p_aacConfig->n_bitrate == 0 ||
+        p_aacConfig->n_bitsPerSample != 16 ||
+        sizeof(INT_PCM) != sizeof(int16_t)) {
+        ALOGE("Unsupported WFD AAC configuration (requires mono/stereo PCM16)");
         return false;
     }
 
+    // Prepare the candidate before replacing any working instance.
+    aacInfo *info = new (std::nothrow) aacInfo{};
+    if (!info) {
+        ALOGE("Failed to allocate WFD AAC encoder state");
+        return false;
+    }
+
+    HANDLE_AACENCODER encoder = NULL;
+    AACENC_ERROR err = aacEncOpen(&encoder, 0x01 /* AAC encoder */, p_aacConfig->n_channels);
+    if (err != AACENC_OK || !encoder) {
+        ALOGE("Failed to open WFD AAC encoder: %d", err);
+        if (encoder)
+            aacEncClose(&encoder);
+        delete info;
+        return false;
+    }
+
+    // The decoder consumes ADTS and the WFD path uses AAC-LC PCM16.
+    // The FDK encoder requires AOT, channel mode and transport to be set,
+    // then a NULL-buffer initialization call before accepting audio.
+    err = aacEncoder_SetParam(encoder, AACENC_AOT, AOT_AAC_LC);
+    if (err == AACENC_OK)
+        err = aacEncoder_SetParam(encoder, AACENC_CHANNELMODE, p_aacConfig->n_channels);
+    if (err == AACENC_OK)
+        err = aacEncoder_SetParam(encoder, AACENC_SAMPLERATE, p_aacConfig->n_sampleRate);
+    if (err == AACENC_OK)
+        err = aacEncoder_SetParam(encoder, AACENC_BITRATE, p_aacConfig->n_bitrate);
+    if (err == AACENC_OK)
+        err = aacEncoder_SetParam(encoder, AACENC_TRANSMUX, TT_MP4_ADTS);
+    if (err == AACENC_OK)
+        err = aacEncEncode(encoder, NULL, NULL, NULL, NULL);
+    if (err != AACENC_OK) {
+        ALOGE("Failed to initialize WFD AAC encoder: %d", err);
+        aacEncClose(&encoder);
+        delete info;
+        return false;
+    }
+
+    if (p_aacHandle) {
+        HANDLE_AACENCODER previous = static_cast<HANDLE_AACENCODER>(p_aacHandle);
+        aacEncClose(&previous);
+    }
+    delete static_cast<aacInfo*>(p_aacInfo);
+
+    p_aacHandle = encoder;
+    p_aacInfo = info;
     memcpy(&s_aacConfig, p_aacConfig, sizeof(s_aacConfig));
-
-    /* Configure AAC encoder here */
-
-    AACENC_ERROR err = AACENC_OK;
-
-    p_aacInfo = (void*)new(aacInfo);
-    if(!p_aacInfo) {
-        ALOGE("Failed to allocate aacInfo");
-        return false;
-    }
-
-    /* Open AAC encoder */
-    err = aacEncOpen((HANDLE_AACENCODER*)(&p_aacHandle),
-                      0x01 /* AAC */,
-                      s_aacConfig.n_channels);
-
-    if(err != AACENC_OK) {
-        ALOGE("Failed top open AAC encoder");
-        return false;
-    }
-
-    /* Set Bitrate and SampleRate */
-    err = aacEncoder_SetParam((HANDLE_AACENCODER)p_aacHandle,
-                               AACENC_BITRATE,
-                               s_aacConfig.n_bitrate);
-
-    if(err != AACENC_OK) {
-        ALOGE("Failed to set bitrate param to AAC encoder");
-        return false;
-    }
-
-    err = aacEncoder_SetParam((HANDLE_AACENCODER)p_aacHandle,
-                                   AACENC_SAMPLERATE,
-                                   s_aacConfig.n_sampleRate);
-
-    if(err != AACENC_OK) {
-        ALOGE("Failed to set samplerate param to AAC encoder");
-        return false;
-    }
-
-    /* Fix Channel mode and order */
-    /* TODO */
-
-    /* Prefill encode structures */
-    /* TODO */
-
     return true;
 }
 
-bool aacEncode::aacEncodeFrame(unsigned char * p_inBuffer,
-                              unsigned int n_inSize,
-                              unsigned char * p_outBuffer,
-                              unsigned int n_outSize,
-                              unsigned int * p_length) {
-    (void)n_inSize;
-    (void)n_outSize;
-    (void)p_length;
-    if(!p_inBuffer || !p_outBuffer) {
-        ALOGE("No buffers provided for AAC encoder");
+bool aacEncode::aacEncodeFrame(unsigned char *p_inBuffer,
+                               unsigned int n_inSize,
+                               unsigned char *p_outBuffer,
+                               unsigned int n_outSize,
+                               unsigned int *p_length) {
+    if (!p_length)
+        return false;
+    *p_length = 0;
+
+    if (!p_aacHandle || !p_aacInfo || !p_inBuffer || !p_outBuffer ||
+        n_inSize == 0 || n_outSize == 0 ||
+        n_inSize > INT_MAX || n_outSize > INT_MAX ||
+        n_inSize % sizeof(INT_PCM) != 0) {
+        ALOGE("Invalid WFD AAC encoder state or input/output capacity");
         return false;
     }
 
-    aacInfo *tempAacInfo = (aacInfo*)p_aacInfo;
-    tempAacInfo->inBuff.bufs = (void**) (&p_inBuffer);
-    tempAacInfo->outBuff.bufs = (void**) (&p_outBuffer);
-
-    AACENC_ERROR err = AACENC_OK;
-
-    if(p_aacHandle) {
-        err = aacEncEncode((HANDLE_AACENCODER)p_aacHandle,
-                           &tempAacInfo->inBuff,
-                           &tempAacInfo->outBuff,
-                           &tempAacInfo->inArg,
-                           &tempAacInfo->outArg);
-
-        if(err != AACENC_OK) {
-            ALOGE("Failed to encode buffer");
-            return false;
-        }
-    } else {
-        ALOGE("No encoder available");
+    const unsigned int samples = n_inSize / sizeof(INT_PCM);
+    if (samples == 0 || samples > INT_MAX ||
+        samples % s_aacConfig.n_channels != 0) {
+        ALOGE("Invalid WFD PCM sample count");
         return false;
     }
 
+    aacInfo *state = static_cast<aacInfo*>(p_aacInfo);
+    // FDK's descriptors require identifiers, byte sizes, element sizes and
+    // counts; setting only .bufs used to pass uninitialized descriptor data.
+    void *inputBuffers[] = {p_inBuffer};
+    void *outputBuffers[] = {p_outBuffer};
+    INT inputIds[] = {IN_AUDIO_DATA};
+    INT outputIds[] = {OUT_BITSTREAM_DATA};
+    INT inputSizes[] = {static_cast<INT>(n_inSize)};
+    INT outputSizes[] = {static_cast<INT>(n_outSize)};
+    INT inputElementSizes[] = {sizeof(INT_PCM)};
+    INT outputElementSizes[] = {sizeof(UCHAR)};
+
+    state->inBuff = {};
+    state->inBuff.numBufs = 1;
+    state->inBuff.bufs = inputBuffers;
+    state->inBuff.bufferIdentifiers = inputIds;
+    state->inBuff.bufSizes = inputSizes;
+    state->inBuff.bufElSizes = inputElementSizes;
+
+    state->outBuff = {};
+    state->outBuff.numBufs = 1;
+    state->outBuff.bufs = outputBuffers;
+    state->outBuff.bufferIdentifiers = outputIds;
+    state->outBuff.bufSizes = outputSizes;
+    state->outBuff.bufElSizes = outputElementSizes;
+
+    state->inArg = {};
+    state->outArg = {};
+    state->inArg.numInSamples = static_cast<INT>(samples);
+
+    const AACENC_ERROR err = aacEncEncode(
+            static_cast<HANDLE_AACENCODER>(p_aacHandle),
+            &state->inBuff, &state->outBuff, &state->inArg, &state->outArg);
+    if (err != AACENC_OK || state->outArg.numOutBytes < 0 ||
+        static_cast<unsigned int>(state->outArg.numOutBytes) > n_outSize ||
+        state->outArg.numInSamples != state->inArg.numInSamples) {
+        // The legacy wrapper cannot report a partially consumed PCM buffer.
+        // Fail closed instead of claiming a successful encode or overrun.
+        ALOGE("WFD AAC encode failed or returned inconsistent buffer lengths");
+        return false;
+    }
+
+    // Zero bytes is valid while the FDK encoder is still buffering audio.
+    *p_length = static_cast<unsigned int>(state->outArg.numOutBytes);
     return true;
 }
