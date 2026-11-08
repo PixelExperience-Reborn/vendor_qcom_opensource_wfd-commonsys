@@ -91,7 +91,10 @@ bool aacDecode::aacConfigure(aacConfigType *p_aacConfig) {
 }
 
 bool aacDecode::aacDecodeFrame(unsigned char *p_buffer, unsigned int n_size) {
-    if (!p_buffer || n_size < 7 || n_size > INT_MAX || !p_aacHandle) {
+    // An untrusted legacy length must not cause multi-gigabyte PCM allocation.
+    static constexpr unsigned int kMaxFrameBufferBytes = 64U * 1024U;
+    if (!p_buffer || n_size < 7 || n_size > kMaxFrameBufferBytes ||
+        n_size > INT_MAX || !p_aacHandle) {
         ALOGE("Invalid WFD AAC decoder state/buffer");
         return false;
     }
