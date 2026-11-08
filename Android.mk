@@ -1,5 +1,10 @@
 LOCAL_PATH := $(call my-dir)
 
+# The 2018 WFD AAC wrapper is NOT an Android17 Miracast service.
+# Avoid unverified audio/vendor display dependencies for mondrian. Keep the
+# original QSSI/QMAA/low-RAM selection intact for other historic targets.
+ifneq ($(TARGET_DEVICE),mondrian)
+
 ifneq ($(filter $(QSSI_SUPPORTED_PLATFORMS),$(TARGET_BOARD_PLATFORM)),)
 
 QMAA_DISABLES_WFD := false
@@ -27,3 +32,5 @@ endif #TARGET_HAS_LOW_RAM
 endif #WFD_DISABLE_PLATFORM_LIST
 
 endif
+
+endif # TARGET_DEVICE != mondrian
